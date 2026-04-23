@@ -92,12 +92,25 @@ def get_categories():
     return result
 
 @app.get("/products")
-def get_products(category: Optional[str] = Query(None)):
+def get_products(
+    category: Optional[str] = Query(None),
+    search: Optional[str] = Query(None),
+    sort: Optional[str] = Query(None),
+    page: int = Query(1),
+    limit: int = Query(10)
+):
     db = SessionLocal()
+    query = db.query(ProductModel)
     if category:
-        products = db.query(ProductModel).filter(ProductModel.category_id == category).all()
-    else:
-        products = db.query(ProductModel).all()
+        query = query.filter(ProductModel.category_id == category)
+    if search:
+        query = query.filter(ProductModel.name.ilike(f"%{search}%"))
+    if sort == "price_asc":
+        query = query.order_by(ProductModel.price.asc())
+    elif sort == "price_desc":
+        query = query.order_by(ProductModel.price.desc())
+    offset = (page - 1) * limit
+    products = query.offset(offset).limit(limit).all()
     result = [{"id": p.id, "name": p.name, "price": p.price, "stock": p.stock, "category_id": p.category_id} for p in products]
     db.close()
     return result
@@ -274,3 +287,43 @@ def update_status(order_id: str, status: str, current_user: UserModel = Depends(
     db.commit()
     db.close()
     return {"message": f"Статус изменён на '{status}'"}
+
+@app.get("/admin/stats")
+def admin_stats(current_user: UserModel = Depends(get_current_user)):
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Доступ запрещён")
+    db = SessionLocal()
+
+    # Количество пользователей
+    total_users = db.query(UserModel).count()
+
+    # Общая выручка
+    orders = db.query(OrderModel).all()
+    total_revenue = sum(o.total_price for o in orders)
+
+    # Топ-3 товара
+    from sqlalchemy import func
+    top_products = (
+        db.query(OrderItemModel.product_id, func.sum(OrderItemModel.quantity).label("total_sold"))
+        .group_by(OrderItemModel.product_id)
+        .order_by(func.sum(OrderItemModel.quantity).desc())
+        .limit(3)
+        .all()
+    )
+    top_result = []
+    for product_id, total_sold in top_products:
+        product = db.query(ProductModel).filter(ProductModel.id == product_id).first()
+        top_result.append({"product": product.name if product else "Удалён", "total_sold": total_sold})
+
+    db.close()
+    return {"total_users": total_users, "total_revenue": total_revenue, "top_products": top_result}
+
+@app.get("/admin/inventory")
+def admin_inventory(current_user: UserModel = Depends(get_current_user)):
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Доступ запрещён")
+    db = SessionLocal()
+    low_stock = db.query(ProductModel).filter(ProductModel.stock < 5).all()
+    result = [{"id": p.id, "name": p.name, "stock": p.stock} for p in low_stock]
+    db.close()
+    return {"low_stock_products": result}
